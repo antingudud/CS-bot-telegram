@@ -29,40 +29,75 @@ async fn main() {
     );
 }
 
-async fn send_request(msg: Msg) -> Result<(), Box<dyn Error>> {
+async fn send_request(msg: Msg) -> Result<Option<u8>, Box<dyn Error>> {
     let client = reqwest::Client::new();
     let json = serde_json::to_string(&msg)?;
     let res = client.post("http://127.0.0.1:3030/post-message")
         .body(json.clone())
         .header("Content-Type", "application/json")
         .send()
+        .await?
+        .json::<ResponseMsg>()
         .await?;
     println!("[LOG] Request JSON: {}", &json);
 
     //println!("Request response:\n{}\n{}", res.status(), res.text().await?);
-    let json_res: ResponseMsg = res.json::<ResponseMsg>().await?;
-    println!("Request response:\n{:?}", &json_res);
-    if json_res.code == 2 {
-        println!("[ERROR] at send_request: STATUS OF {} NO FORUM: {}", json_res.status, json_res.message);
-    } else {
-        println!("[ERROR] at send_request: STATUS OF {} {}", json_res.status, json_res.message);
-    }
-    Ok(())
+    if res.status.eq("fail") {
+        if res.code == 2 {
+            println!("[ERROR] at send_request: STATUS OF {} NO FORUM: {}", res.status, res.message);
+            return Ok(Some(2));
+        }
+        if res.code == 1 {
+            println!("[INFO] send_request: STATUS OF {} {}", res.status, res.message);
+        }
+        return Ok(Some(1));
+    } 
+    Ok(None)
 }
 
 // TODO: there should be only one send_request
-async fn send_init_request(params: PayloadInit) -> Result<(), Box<dyn Error>> {
+async fn send_init_request(params: PayloadInit) -> Result<Option<u32>, Box<dyn Error>> {
     let client = reqwest::Client::new();
     let json = serde_json::to_string(&params)?;
     let res = client.post("http://127.0.0.1:3030/init")
         .body(json.clone())
         .header("Content-Type", "application/json")
         .send()
+        .await?
+        .json::<ResponseForum>()
         .await?;
-    println!("{}", &json);
+    //println!("{}", &json);
 
-    println!("Request response:\n{}\n{}", res.status(), res.text().await?);
-    Ok(())
+    println!("Request code: {}", res.code);
+    if res.status.eq("fail"){
+        if res.code == 1 {return Ok(Some(1))};
+        if res.message.eq("forum exists") {return Ok(Some(2))};
+        return Ok(Some(1));
+    }
+
+    //println!("Request response:\n{}\n{}", res.status(), res.text().await?);
+    Ok(None)
+}
+
+async fn send_close_request(params: PayloadClose) -> Result<Option<u8>, Box<dyn Error>> {
+    let client = reqwest::Client::new();
+    let json = serde_json::to_string(&params)?;
+    let res = client.post("http://127.0.0.1:3030/close")
+        .body(json)
+        .header("Content-Type", "application/json")
+        .send()
+        .await?
+        .json::<ResponseMsg>()
+        .await?;
+
+    if res.status.eq("fail") {
+        if res.code == 1 {return Ok(Some(1))};
+        if res.message.eq("forum not found") {return Ok(Some(2))};
+        return Ok(Some(1));
+    }
+
+    //println!("Request response:\n{}\n{}", res.status(), res.text().await?);
+    Ok(None)
 }
 
 fn make_forum_payload(chat_id: ChatId, title: String) -> PayloadInit {
@@ -76,43 +111,70 @@ fn make_forum_payload(chat_id: ChatId, title: String) -> PayloadInit {
     //Ok(())
 }
 
-async fn telegram_handler(msg: Message, bot: Bot) -> Result<(), Box<dyn Error + Send + Sync>> {
-    println!("Chat Id: {}", msg.chat.id);
-    println!("TextL {}", msg.text().unwrap());
-    let chat_id: i64 = msg.chat.id.0;
-    let (command, args) = parse_command(msg.text().unwrap(), "Telecord").unwrap_or(("", vec!("")));
-
-    if command.eq("bukatiket") {
-        if args.is_empty() {
-            bot.send_message(msg.chat.id, "Mohon maaf, tolong ketik judul di setelah '/bukatiket'.".to_string()).await?;
-            return Ok(());
-        }
-
-        let pl: PayloadInit = make_forum_payload(msg.chat.id.clone(), args.join(" "));
-
-        let i: u8 = match send_init_request(pl).await {
-            Ok(_) => {
-                0
-            },
-            Err(why) => {
-                println!("[ERROR] at telegram_handler in bukatiket: {:?}", why);
-                1
-            }
-        };
-
-        if i > 0 {
-            bot.send_message(msg.chat.id, "Mohon maaf, terjadi kesalahan ketika membuka tiket. Mohon coba lagi di lain waktu.".to_string()).await?;
-        } else {
-            bot.send_message(msg.chat.id, "Terima kasih, pesan anda berikutnya akan dikirimkan ke tim Customer Service kami.".to_string()).await?;
-        }
-        
+async fn bukatiket_handler(bot: &Bot, chid: ChatId, args: Vec<&str>) -> Result<(), Box<dyn Error>> {
+    if args.is_empty() {
+        bot.send_message(chid, "Mohon maaf, tolong ketik judul di setelah '/bukatiket'.".to_string()).await?;
         return Ok(());
-    } else if command.eq("tutuptiket"){
-        bot.send_message(msg.chat.id, "Terima kasih, tiket ini sudah ditutup.".to_string()).await?;
-    } else if command.eq("start") {
-        bot.send_message(msg.chat.id, "Halo, selamat datang di Customer Service Icommits! Ada yang bisa saya bantu?\n\nUntuk membuat tiket baru, kirim /bukatiket <deskripsi singkat permasalahan>\nJika sudah selesai, anda bisa kirim /tutuptiket untuk menutupnya.".to_string()).await?;
     }
-    
+
+    let pl: PayloadInit = make_forum_payload(chid, args.join(" "));
+
+    let i: u8 = match send_init_request(pl).await {
+        Ok(x) => {
+            match x {
+                Some(v) => {
+                    if v == 1 {1}
+                    else {1}
+                },
+                None => 0
+            }
+        },
+        Err(why) => {
+            println!("[ERROR] at telegram_handler in bukatiket: {:?}", why);
+            1
+        }
+    };
+
+    if i == 2 {
+        bot.send_message(chid, "Mohon maaf, saat ini anda sedang berada dalam tiket aktif. Mohon untuk menutup tiket ini jika ingin membuka tiket baru.".to_string()).await?;
+    } else if i == 1 {
+        bot.send_message(chid, "Mohon maaf, terjadi kesalahan ketika membuka tiket. Mohon coba lagi di lain waktu.".to_string()).await?;
+    } else if i == 0{
+        bot.send_message(chid, "Terima kasih, pesan anda berikutnya akan dikirimkan ke tim Customer Service kami.".to_string()).await?;
+    }
+
+    Ok(())
+}
+
+async fn tutuptitket_handler(bot: &Bot, chid: ChatId) -> Result<(), Box<dyn Error>> {
+    let pl = PayloadClose {
+        id: chid.0.clone()
+    };
+
+    let i: u8 = match send_close_request(pl).await? {
+        Some(x) => x,
+        None => 0
+    };
+
+    if i == 1 {
+        bot.send_message(chid, "Mohon maaf, terjadi kesalahan ketika menutup tiket. Mohon coba lagi di lain waktu.".to_string()).await?;
+    } else if i == 2 {
+        bot.send_message(chid, "Mohon maaf, tiket yang dimaksud tidak ada. Mohon coba lagi di lain waktu.").await?;
+    } else if i == 0 {
+        bot.send_message(chid, "Tiket sudah ditutup, terima kasih sudah menggunakan layanan kami.".to_string()).await?;
+    }
+
+    Ok(())
+}
+
+async fn telegram_handler(msg: Message, bot: Bot) -> Result<(), Box<dyn Error + Send + Sync>> {
+    //println!("Chat Id: {}", msg.chat.id);
+    //println!("TextL {}", msg.text().unwrap());
+    let chat_id: i64 = msg.chat.id.0;
+    if chat_id < 0 {
+        bot.send_message(msg.chat.id, "Bot ini hanya bisa dijalankan di dalam pesan langsung atau DM.").await?;
+        return Ok(());
+    }
     let mut caption: Option<String> = None;
     let attachment: Vec<(String, String)> = match get_file_id(&msg) {
         Some((id, capt)) => {
@@ -126,10 +188,6 @@ async fn telegram_handler(msg: Message, bot: Bot) -> Result<(), Box<dyn Error + 
         None => Vec::new()
     };
 
-    let author: String = match msg.from() {
-        Some(x) => x.full_name(),
-        None => String::from("Unknown User")
-    };
     let text: String = match msg.text() {
         Some(x) => {
             x.to_string()
@@ -141,6 +199,23 @@ async fn telegram_handler(msg: Message, bot: Bot) -> Result<(), Box<dyn Error + 
             }
         }
     };
+    let (command, args) = parse_command(&text, "Telecord").unwrap_or(("", vec!("")));
+
+    if command.eq("bukatiket") {
+        let _ = bukatiket_handler(&bot, msg.chat.id.clone(), args).await;
+        return Ok(());
+    } else if command.eq("tutuptiket"){
+        let _ = tutuptitket_handler(&bot, msg.chat.id.clone()).await;
+        return Ok(());
+    } else if command.eq("start") {
+        bot.send_message(msg.chat.id, "Halo, selamat datang di Customer Service Icommits! Ada yang bisa saya bantu?\n\nUntuk membuat tiket baru, kirim /bukatiket <deskripsi singkat permasalahan>\nJika sudah selesai, anda bisa kirim /tutuptiket untuk menutupnya.".to_string()).await?;
+        return Ok(());
+    }
+    
+    let author: String = match msg.from() {
+        Some(x) => x.full_name(),
+        None => String::from("Unknown User")
+    };
     let smesg: Msg = Msg {
         tele_id: chat_id,
         author,
@@ -148,9 +223,26 @@ async fn telegram_handler(msg: Message, bot: Bot) -> Result<(), Box<dyn Error + 
         attachment
     };
     println!("INFO: {:?}", smesg);
-    if let Err(why) = send_request(smesg).await {
-        println!("[ERROR] Error at sending request in telegram_handler: {:?}", why)
+
+    let sus = match send_request(smesg).await {
+        Ok(x) => x,
+        Err(why) => {
+            println!("[ERROR] Error at sending request in telegram_handler: {:?}", why);
+            Some(1)
+        }
     };
+
+    let i: u8 = match sus {
+        Some(x) => x,
+        None => 0
+    };
+
+    if i == 2 {
+        bot.send_message(msg.chat.id, "Mohon untuk buka tiket baru.".to_string()).await?;
+    } else if i == 1 {
+        bot.send_message(msg.chat.id, "Mohon maaf, telah terjadi kesalahan. Mohon coba lagi beberapa saat nanti.").await?;
+    }
+
     Ok(())
 }
 
@@ -296,12 +388,18 @@ struct PayloadInit {
     title: String
 }
 
-//#[derive(Deserialize, Debug)]
-//struct ResponseForum {
-//    status: String,
-//    message: String,
-//    id: u64 // forum post id
-//}
+#[derive(Serialize)]
+struct PayloadClose {
+    id: i64
+}
+
+#[derive(Deserialize, Debug)]
+struct ResponseForum {
+    status: String,
+    code: u8, // 0 is normal, 1 is system error, 2 is logic error
+    message: String,
+    id: u64 // forum post id | 0 is null
+}
 
 #[derive(Deserialize, Debug)]
 struct ResponseMsg {
